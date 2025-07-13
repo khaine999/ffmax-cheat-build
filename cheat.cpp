@@ -1,149 +1,227 @@
-
-// == Free Fire MAX 64-bit - Full Cheat (Aimbot + ESP + ImGui Menu) ==
-// == arm64-v8a.so build - Full Source Code ==
-
-#include <pthread.h>
-#include <unistd.h>
+#include <stdio.h>
 #include <android/log.h>
-#include <GLES2/gl2.h>
-#include <EGL/egl.h>
-#include "imgui.h"
-#include "imgui_impl_android.h"
-#include "imgui_impl_opengl3.h"
-#include <cmath>
-#include <vector>
-#include <string>
+#include <unistd.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <math.h>
+#include <stdlib.h>
+#include <time.h>
+#include "imgui.h" // Đã fix, cần đặt imgui.h trong thư mục
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "FF_CHEAT", __VA_ARGS__)
+// Base (giả định, thay bằng base thực từ `pm map com.dts.freefiremax`)
+void* lib_base = (void*)0x10000000;
+void* local_player_base = lib_base + 0x385E098;
+void* target_list = lib_base + 0x385E0B0;
+void* camera_manager = lib_base + 0x2B3A9AC;
+void* view_matrix = lib_base + 0x2B17C8C;
 
-bool enableAimbot = true;
-bool enableESP = true;
-float aimFOV = 90.0f;
-bool showMenu = true;
-ImVec4 espColorEnemy = ImVec4(1.0f, 0.0f, 0.0f, 1.0f);
+// Offsets
+int target_size = 0x8;
+int my_team_offset = 0x3C;
+int is_alive_offset = 0xE0;
+int team_id_offset = 0x3C;
+int position_offset = 0x34;
+int player_name_offset = 0x158;
+int bone_base_offset = 0x200;
+int head_bone_index = 0x70;
+int health_offset = 0xF4;
+int is_knocked_offset = 0x2D8;
+int is_enemy_visible_offset = 0x11C;
+int is_behind_wall_offset = 0x118;
+int weapon_offset = 0x1B0; // Giả định
+int input_trigger_offset = 0x158;
+int camera_offset = 0x10;
+int anti_scan_offset = 0x400; // Giả định
+int volume_offset = 0x200; // Giả định
+int record_offset = 0x300; // Giả định
 
-struct Vector3 {
-    float x, y, z;
-};
+// Structs
+struct Vector3 { float x, y, z; };
+struct Vector2 { float x, y; };
 
-struct Matrix4x4 {
-    float m[16];
-};
+// State
+bool enableESP = true, showBox = true, showName = true, showDistance = true, showLine = true, showHP = true;
+bool showStatus = true, showSkeleton = true, wallhack = true, showWeapon = true, showRadar = true;
+bool enableColor = false, hideOnRecord = false, enableAimbot = true;
+float boxSize = 50.0f, radarSize = 200.0f, aimFOV = 30.0f;
+ImVec4 boxColor = ImVec4(1.0f, 0.0f, 0.0f, 1.0f);
+bool menuVisible = false, isRecording = false;
+int volumePressCount = 0;
 
-uintptr_t TargetList = 0x385E0B0;
-uintptr_t CameraManager = 0x2B3A9AC;
-uintptr_t LocalPlayerBase = 0x385E098;
-uintptr_t ViewMatrix = 0x2B17C8C;
-
-bool WorldToScreen(const Vector3& world, Vector3& screen, float width, float height) {
-    Matrix4x4 matrix = *(Matrix4x4*)(ViewMatrix);
-    float w = matrix.m[3] * world.x + matrix.m[7] * world.y + matrix.m[11] * world.z + matrix.m[15];
-    if (w < 0.1f) return false;
-    float x = matrix.m[0] * world.x + matrix.m[4] * world.y + matrix.m[8] * world.z + matrix.m[12];
-    float y = matrix.m[1] * world.x + matrix.m[5] * world.y + matrix.m[9] * world.z + matrix.m[13];
-    screen.x = (width / 2.0f) + (x / w) * (width / 2.0f);
-    screen.y = (height / 2.0f) - (y / w) * (height / 2.0f);
-    screen.z = 0;
-    return true;
+bool FirePressed() { return *(bool*)((char*)local_player_base + input_trigger_offset); }
+struct Vector3 GetBonePosition(uintptr_t entity, int index) {
+    uintptr_t bone_base = *(uintptr_t*)((char*)entity + bone_base_offset);
+    return *(struct Vector3*)((char*)bone_base + index * 0x30);
 }
-
-float GetDistance(Vector3 a, Vector3 b) {
+float GetDistance(struct Vector3 a, struct Vector3 b) {
     return sqrtf(powf(a.x - b.x, 2) + powf(a.y - b.y, 2) + powf(a.z - b.z, 2));
 }
-
-bool FirePressed() {
-    uintptr_t local = *(uintptr_t*)LocalPlayerBase;
-    if (!local) return false;
-    return *(bool*)(local + 0x158);
+bool WorldToScreen(struct Vector3 world, struct Vector2* screen) {
+    float* matrix = (float*)view_matrix; // Giả định 16 float
+    screen->x = world.x * matrix[0] + world.y * matrix[4] + world.z * matrix[8] + matrix[12];
+    screen->y = world.x * matrix[1] + world.y * matrix[5] + world.z * matrix[9] + matrix[13];
+    return (screen->z = world.x * matrix[3] + world.y * matrix[7] + world.z * matrix[11] + matrix[15]) > 0;
 }
 
-Vector3 GetBonePosition(uintptr_t enemy, int boneOffset) {
-    uintptr_t boneBase = *(uintptr_t*)(enemy + 0x200);
-    uintptr_t bone = *(uintptr_t*)(boneBase + boneOffset);
-    return *(Vector3*)(bone + 0x34);
+void bypass_scan() {
+    if (*(int*)((char*)local_player_base + anti_scan_offset) == 1) {
+        usleep(rand() % 100000 + 50000);
+        __android_log_print(ANDROID_LOG_INFO, "Hack", "Bypass Scan Detected");
+    }
 }
 
-void* AimbotThread(void*) {
-    while (true) {
-        if (!enableAimbot) {
-            usleep(50000);
-            continue;
+void handle_volume_key() {
+    if (*(int*)((char*)local_player_base + volume_offset) == 1) {
+        volumePressCount++;
+        if (volumePressCount == 2) {
+            menuVisible = !menuVisible;
+            volumePressCount = 0;
         }
-        Vector3 localCam = *(Vector3*)(CameraManager + 0x10);
-        float closestDist = 9999.0f;
-        Vector3 targetHead = {};
-        for (int i = 0; i < 30; i++) {
-            uintptr_t enemy = *(uintptr_t*)(TargetList + i * 0x8);
-            if (!enemy) continue;
-            bool isDead = *(bool*)(enemy + 0xE0);
-            bool isKnocked = *(bool*)(enemy + 0x2D8);
-            bool isVisible = *(bool*)(enemy + 0x11C);
-            bool isBehindWall = *(bool*)(enemy + 0x118);
-            int teamID = *(int*)(enemy + 0x3C);
-            if (isDead || isKnocked || !isVisible || isBehindWall || teamID == *(int*)(LocalPlayerBase + 0x3C)) continue;
-            Vector3 head = GetBonePosition(enemy, 0x70);
-            float dist = GetDistance(localCam, head);
-            if (dist < closestDist && dist < aimFOV) {
-                closestDist = dist;
-                targetHead = head;
+        usleep(500000);
+    }
+}
+
+void check_recording() {
+    if (*(int*)((char*)local_player_base + record_offset) == 1) isRecording = true;
+    else isRecording = false;
+}
+
+void RenderESP(uintptr_t enemy, struct Vector3 my_pos) {
+    if (!enableESP || (hideOnRecord && isRecording)) return;
+    int my_team = *(int*)((char*)local_player_base + my_team_offset);
+    int team_id = *(int*)((char*)enemy + team_id_offset);
+    if (team_id == my_team && !wallhack) return;
+    struct Vector3 pos = *(struct Vector3*)((char*)enemy + position_offset);
+    struct Vector2 screen;
+    if (!WorldToScreen(pos, &screen)) return;
+    float dist = GetDistance(my_pos, pos);
+    float size = boxSize / (dist / 10.0f + 1.0f);
+
+    bypass_scan();
+    if (showBox) ImGui::GetOverlayDrawList()->AddRect(ImVec2(screen.x - size/2, screen.y - size), ImVec2(screen.x + size/2, screen.y), ImGui::GetColorU32(boxColor));
+    if (showName) ImGui::GetOverlayDrawList()->AddText(ImVec2(screen.x, screen.y - size - 10), 0xFFFFFFFF, (char*)((char*)enemy + player_name_offset));
+    if (showDistance) {
+        char distStr[16]; snprintf(distStr, sizeof(distStr), "%.1fm", dist);
+        ImGui::GetOverlayDrawList()->AddText(ImVec2(screen.x, screen.y + size), 0xFFFFFFFF, distStr);
+    }
+    if (showLine) ImGui::GetOverlayDrawList()->AddLine(ImVec2(960, 1080), screen, ImGui::GetColorU32(boxColor));
+    if (showHP) {
+        float hp = *(float*)((char*)enemy + health_offset) / 100.0f;
+        ImGui::GetOverlayDrawList()->AddRectFilled(ImVec2(screen.x - 25, screen.y - size - 5), ImVec2(screen.x - 25 + 50 * hp, screen.y - size), 0xFF00FF00);
+    }
+    if (showStatus) {
+        bool knocked = *(int*)((char*)enemy + is_knocked_offset);
+        ImGui::GetOverlayDrawList()->AddText(ImVec2(screen.x, screen.y + size + 10), knocked ? 0xFFFFFF00 : 0xFFFFFFFF, knocked ? "Knocked" : "Alive");
+    }
+    if (showSkeleton) {
+        struct Vector3 head = GetBonePosition(enemy, head_bone_index);
+        struct Vector2 headScreen;
+        if (WorldToScreen(head, &headScreen)) ImGui::GetOverlayDrawList()->AddLine(screen, headScreen, 0xFFFFFFFF);
+    }
+    if (showWeapon) ImGui::GetOverlayDrawList()->AddText(ImVec2(screen.x, screen.y + size + 20), 0xFFFFFFFF, (char*)((char*)enemy + weapon_offset));
+    if (showRadar) {
+        float radarX = 50 + (pos.x / 1000.0f) * radarSize;
+        float radarY = 50 + (pos.z / 1000.0f) * radarSize;
+        ImGui::GetOverlayDrawList()->AddCircleFilled(ImVec2(radarX, radarY), 5, 0xFF0000FF);
+    }
+}
+
+void AimbotThread() {
+    srand(time(NULL));
+    while (true) {
+        usleep(16000 + rand() % 1000);
+        bypass_scan();
+        if (enableAimbot && FirePressed()) {
+            struct Vector3 my_pos = *(struct Vector3*)((char*)local_player_base + position_offset);
+            int my_team = *(int*)((char*)local_player_base + my_team_offset);
+            uintptr_t closest_enemy = 0;
+            float min_fov = aimFOV;
+            for (int i = 0; i < 30; i++) {
+                uintptr_t enemy = *(uintptr_t*)((char*)target_list + i * target_size);
+                if (!enemy) continue;
+                bool is_dead = !*(int*)((char*)enemy + is_alive_offset);
+                bool is_knocked = *(int*)((char*)enemy + is_knocked_offset);
+                bool is_visible = *(int*)((char*)enemy + is_enemy_visible_offset);
+                bool is_behind_wall = *(int*)((char*)enemy + is_behind_wall_offset);
+                int team_id = *(int*)((char*)enemy + team_id_offset);
+                if (is_dead || is_knocked || !is_visible || is_behind_wall || team_id == my_team) continue;
+                struct Vector3 head_pos = GetBonePosition(enemy, head_bone_index);
+                struct Vector2 screen;
+                if (WorldToScreen(head_pos, &screen)) {
+                    float fov = sqrtf(powf(screen.x - 960, 2) + powf(screen.y - 540, 2));
+                    if (fov < min_fov) {
+                        min_fov = fov;
+                        closest_enemy = enemy;
+                    }
+                }
+            }
+            if (closest_enemy) {
+                struct Vector3 target_head = GetBonePosition(closest_enemy, head_bone_index);
+                *(struct Vector3*)((char*)camera_manager + camera_offset) = target_head;
+                __android_log_print(ANDROID_LOG_INFO, "Hack", "Aimbot Aiming at FOV %.1f", min_fov);
             }
         }
-        if (closestDist < 9999.0f && FirePressed()) {
-            *(Vector3*)(CameraManager + 0x10) = targetHead;
+    }
+}
+
+void ESPThread() {
+    srand(time(NULL));
+    while (true) {
+        usleep(16000 + rand() % 1000);
+        check_recording();
+        struct Vector3 my_pos = *(struct Vector3*)((char*)local_player_base + position_offset);
+        for (int i = 0; i < 30; i++) {
+            uintptr_t enemy = *(uintptr_t*)((char*)target_list + i * target_size);
+            if (!enemy) continue;
+            RenderESP(enemy, my_pos);
         }
-        usleep(5000);
-    }
-    return nullptr;
-}
-
-void DrawESP(ImDrawList* drawList, float width, float height) {
-    for (int i = 0; i < 30; i++) {
-        uintptr_t enemy = *(uintptr_t*)(TargetList + i * 0x8);
-        if (!enemy) continue;
-        bool isDead = *(bool*)(enemy + 0xE0);
-        int teamID = *(int*)(enemy + 0x3C);
-        if (isDead || teamID == *(int*)(LocalPlayerBase + 0x3C)) continue;
-        Vector3 pos = *(Vector3*)(enemy + 0x34);
-        Vector3 screenPos;
-        if (!WorldToScreen(pos, screenPos, width, height)) continue;
-        float boxHeight = 150.0f / (pos.z + 1.0f);
-        float boxWidth = boxHeight / 2.0f;
-        ImVec2 topLeft(screenPos.x - boxWidth / 2, screenPos.y - boxHeight);
-        ImVec2 bottomRight(screenPos.x + boxWidth / 2, screenPos.y);
-        drawList->AddRect(topLeft, bottomRight, ImColor(espColorEnemy), 0, 0, 2.0f);
-        drawList->AddText(ImVec2(screenPos.x - 30, screenPos.y - boxHeight - 15), IM_COL32(255,255,255,255), "Enemy");
     }
 }
 
-bool imgui_initialized = false;
-void HookRender() {
-    if (!imgui_initialized) {
-        ImGui::CreateContext();
-        ImGui_ImplOpenGL3_Init("#version 100");
-        ImGui_ImplAndroid_Init(nullptr);
-        imgui_initialized = true;
-    }
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplAndroid_NewFrame();
-    ImGui::NewFrame();
-    if (showMenu) {
-        ImGui::Begin("FF MAX Cheat Menu");
-        ImGui::Checkbox("Enable Aimbot", &enableAimbot);
-        ImGui::SliderFloat("Aim FOV", &aimFOV, 0.0f, 360.0f);
+void RenderMenu() {
+    if (menuVisible) {
+        ImGui::Begin("Hack Menu", &menuVisible);
         ImGui::Checkbox("Enable ESP", &enableESP);
-        ImGui::ColorEdit4("ESP Color", (float*)&espColorEnemy);
-        ImGui::Checkbox("Show Menu", &showMenu);
+        ImGui::Checkbox("Show Box", &showBox);
+        ImGui::Checkbox("Show Name", &showName);
+        ImGui::Checkbox("Show Distance", &showDistance);
+        ImGui::Checkbox("Show Line", &showLine);
+        ImGui::Checkbox("Show HP", &showHP);
+        ImGui::Checkbox("Show Status", &showStatus);
+        ImGui::Checkbox("Show Skeleton", &showSkeleton);
+        ImGui::Checkbox("Wallhack", &wallhack);
+        ImGui::Checkbox("Show Weapon", &showWeapon);
+        ImGui::Checkbox("Show Radar", &showRadar);
+        ImGui::Checkbox("Custom Color", &enableColor);
+        if (enableColor) ImGui::ColorEdit4("Box Color", (float*)&boxColor);
+        ImGui::Checkbox("Hide on Record", &hideOnRecord);
+        ImGui::Separator();
+        ImGui::Checkbox("Enable Aimbot", &enableAimbot);
+        ImGui::SliderFloat("Aim FOV", &aimFOV, 10.0f, 100.0f);
         ImGui::End();
     }
-    if (enableESP)
-        DrawESP(ImGui::GetBackgroundDrawList(), 1080.0f, 1920.0f);
-    ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
-__attribute__((constructor))
-void init() {
-    pthread_t aimThread;
-    pthread_create(&aimThread, nullptr, AimbotThread, nullptr);
-    LOGI("[+] FF MAX cheat ESP + Aimbot loaded");
+void HackThread() {
+    while (true) {
+        usleep(16000);
+        handle_volume_key();
+        RenderMenu();
+    }
 }
+
+void hack_loop() {
+    pthread_t esp_thread, aimbot_thread, hack_thread;
+    pthread_create(&esp_thread, NULL, (void*)ESPThread, NULL);
+    pthread_create(&aimbot_thread, NULL, (void*)AimbotThread, NULL);
+    pthread_create(&hack_thread, NULL, (void*)HackThread, NULL);
+    pthread_join(esp_thread, NULL);
+    pthread_join(aimbot_thread, NULL);
+    pthread_join(hack_thread, NULL);
+}
+
+extern "C" int main() {
+    ImGui::CreateContext();
+    srand(time(NULL));
+    hack_loop();
+    return 0;
