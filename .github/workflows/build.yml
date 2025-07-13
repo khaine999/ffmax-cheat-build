@@ -2,27 +2,28 @@ name: Build arm64.so
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout repo
+      uses: actions/checkout@v3
 
-      - name: Setup NDK
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r21d
+    - name: Setup NDK
+      uses: android-actions/setup-ndk@v1
+      with:
+        ndk-version: r21d
 
-      - name: Build arm64.so
-        run: |
-          export NDK_PROJECT_PATH=.
-          ndk-build NDK_APPLICATION_MK=./Application.mk APP_BUILD_SCRIPT=./Android.mk
+    - name: Build native library
+      run: |
+        $NDK/ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=./Android.mk APP_ABI=arm64-v8a
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: libcheat
-          path: ./libs/arm64-v8a/libcheat.so
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: arm64-so
+        path: obj/local/arm64-v8a/libarm64.so
